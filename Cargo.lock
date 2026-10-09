@@ -14,6 +14,7 @@ dependencies = [
  "scraper",
  "serde",
  "serde-email",
+ "serde_json",
  "thiserror",
  "tokio",
  "url",
