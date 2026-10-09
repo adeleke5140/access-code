@@ -1,14 +1,14 @@
 mod app;
 
 use axum::extract::State;
-use axum::response::Result;
-use axum::{Json, Router, routing::post};
+use axum::{Json, Router, routing::get, routing::post};
 use serde::{Deserialize, Serialize};
 use serde_email::Email;
-use std::{error::Error, sync::Arc};
+use serde_json::{Value, json};
+use std::sync::Arc;
 use url::Url;
 
-use crate::app::{AppConfig, app};
+use crate::app::{AppConfig, AppError, Result, app};
 
 #[derive(Deserialize)]
 struct Config {
@@ -27,7 +27,7 @@ struct PostBody {
 async fn handle_access_code(
     State(state): State<Arc<AppState>>,
     Json(body): Json<PostBody>,
-) -> Result<Json<u32>> {
+) -> Result<Json<Value>> {
     let PostBody { visitor, address } = body;
 
     let code = app(AppConfig {
@@ -43,9 +43,9 @@ async fn handle_access_code(
         visitor,
         address,
     })
-    .await;
+    .await?;
 
-    Ok(Json::from(code))
+    Ok(Json(json!({ "code": code })))
 }
 
 struct AppState {
@@ -54,18 +54,24 @@ struct AppState {
     password: String,
 }
 
-#[tokio::main]
-// the reason I return a Result here is because of error propagation
-// if I handled the error, there is no need for the caller to handle it again
-// strictly saying: there should be no need for the caller to handle the error
-async fn server(config: Config) -> Result<Router> {
-    // If there is no email, endpoint or password, should the program be recoverable or not?
-    let email = Email::new(config.email)?;
-    let endpoint = Url::parse(&config.endpoint)?;
-    let password = String::from(config.password);
+async fn json() -> Json<Value> {
+    Json(json!({ "status": 200 }))
+}
+
+async fn server(config: &Config) -> Result<Router> {
+    let Ok(email) = Email::new(&config.email) else {
+        return Err(AppError::ParseError("Could not parse email".to_string()));
+    };
+    let Ok(endpoint) = Url::parse(&config.endpoint) else {
+        return Err(AppError::InvalidBaseUrl(
+            config
+                .endpoint
+                .to_owned(),
+        ));
+    };
+    let password = String::from(&config.password);
 
     if password.is_empty() {
-        //w also should just return an error here tbh
         panic!("a password must be set")
     };
 
@@ -78,13 +84,14 @@ async fn server(config: Config) -> Result<Router> {
     let state = Arc::new(state);
     let router = Router::new()
         .route("/access-code", post(handle_access_code))
+        .route("/", get(json))
         .with_state(state);
 
     Ok(router)
 }
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+async fn main() -> Result<()> {
     let config =
         envy::from_env::<Config>().unwrap_or_else(|error| panic!("could not read env: {}", error));
 
@@ -92,17 +99,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .await
         .unwrap_or_else(|error| panic!("{error:#?}"));
 
-    if let Ok(server) = server(config) {
-        let axum_server = axum::serve(listener, server).await;
+    let server = server(&config).await?;
 
-        if let Err(err) = axum_server {
-            // here is where we should panic
-            panic!("An error occured from the server: {}", err)
-        }
-    } else {
-        // log the respective config error
-        // how do we match the error here
-        panic!("Could not start the server")
-    }
+    axum::serve(listener, server).await?;
+
     Ok(())
 }
