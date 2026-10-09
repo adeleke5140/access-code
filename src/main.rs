@@ -15,7 +15,6 @@ struct Config {
     endpoint: String,
     email: String,
     password: String,
-    server_address: String,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -95,7 +94,7 @@ async fn main() -> Result<()> {
     let config =
         envy::from_env::<Config>().unwrap_or_else(|error| panic!("could not read env: {}", error));
 
-    let listener = tokio::net::TcpListener::bind(&config.server_address)
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
         .await
         .unwrap_or_else(|error| panic!("{error:#?}"));
 
