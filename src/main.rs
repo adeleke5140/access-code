@@ -1,91 +1,106 @@
-use axum::{Router, routing::get};
-use reqwest;
-use serde::Deserialize;
+mod app;
+
+use axum::extract::State;
+use axum::{Json, Router, routing::get, routing::post};
+use serde::{Deserialize, Serialize};
 use serde_email::Email;
-use std::error::Error;
+use serde_json::{Value, json};
+use std::sync::Arc;
 use url::Url;
+
+use crate::app::{AppConfig, AppError, Result, app};
 
 #[derive(Deserialize)]
 struct Config {
     endpoint: String,
     email: String,
     password: String,
-    server_address: String,
 }
 
-#[derive(Debug)]
-struct AppConfig {
+#[derive(Serialize, Deserialize)]
+struct PostBody {
+    visitor: String,
+    address: String,
+}
+
+async fn handle_access_code(
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<PostBody>,
+) -> Result<Json<Value>> {
+    let PostBody { visitor, address } = body;
+
+    let code = app(AppConfig {
+        email: state
+            .email
+            .clone(),
+        endpoint: state
+            .endpoint
+            .clone(),
+        password: state
+            .password
+            .clone(),
+        visitor,
+        address,
+    })
+    .await?;
+
+    Ok(Json(json!({ "code": code })))
+}
+
+struct AppState {
     email: Email,
-    password: String,
     endpoint: Url,
+    password: String,
 }
 
-async fn verify_endpoint_login(config: AppConfig) -> Result<(), Box<dyn Error>> {
-    let client = reqwest::Client::new();
-    let json_data = format!(
-        r#"{{ "user_name": {}, user_psswrd: {}}}"#,
-        config.email, config.password
-    );
-
-    let handshake = client.get(&config.endpoint.to_string()).send().await?;
-
-    if handshake.status().is_success() {
-        println!("reached server Successfully")
-    }
-
-    // let response = client
-    //     .post(config.endpoint)
-    //     .header("Content-Type", "x-www-form-urlencoded")
-    //     .body(json_data)
-    //     .send()
-    //     .await?;
-
-    // if response.status().is_success() {
-    //    println!("Successfully logged in")
-    //} else {
-    //    match response.error_for_status() {
-    //        Ok(_) => (),
-    //        Err(e) => {
-    //            eprintln!("error is: {}", e)
-    //        }
-    //    }
-    // }
-
-    Ok(())
+async fn json() -> Json<Value> {
+    Json(json!({ "status": 200 }))
 }
 
-#[tokio::main]
-async fn app() -> Result<Router, Box<dyn Error>> {
-    let router = Router::new().route("/", get(|| async { "Welcome to the access code server" }));
-    Ok(router)
-}
-
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
-    // TODO: there might be something better than panic!
-    let config = envy::from_env::<Config>()
-        .unwrap_or_else(|error| panic!("could not read config: {}", error));
-
-    let email = Email::new(config.email).unwrap_or_else(|error| panic!("email error: {}", error));
-    let endpoint =
-        Url::parse(&config.endpoint).unwrap_or_else(|error| panic!("endpoint error: {}", error));
-    let password = String::from(config.password);
+async fn server(config: &Config) -> Result<Router> {
+    let Ok(email) = Email::new(&config.email) else {
+        return Err(AppError::ParseError("Could not parse email".to_string()));
+    };
+    let Ok(endpoint) = Url::parse(&config.endpoint) else {
+        return Err(AppError::InvalidBaseUrl(
+            config
+                .endpoint
+                .to_owned(),
+        ));
+    };
+    let password = String::from(&config.password);
 
     if password.is_empty() {
         panic!("a password must be set")
     };
 
-    let listener = tokio::net::TcpListener::bind(&config.server_address)
-        .await
-        .unwrap_or_else(|error| panic!("{}", error));
-
-    verify_endpoint_login(AppConfig {
+    let state = AppState {
         email,
         endpoint,
         password,
-    })
-    .await?;
+    };
 
-    // axum::serve(listener, app()).await?;
+    let state = Arc::new(state);
+    let router = Router::new()
+        .route("/access-code", post(handle_access_code))
+        .route("/", get(json))
+        .with_state(state);
+
+    Ok(router)
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    let config =
+        envy::from_env::<Config>().unwrap_or_else(|error| panic!("could not read env: {}", error));
+
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
+        .await
+        .unwrap_or_else(|error| panic!("{error:#?}"));
+
+    let server = server(&config).await?;
+
+    axum::serve(listener, server).await?;
+
     Ok(())
 }
