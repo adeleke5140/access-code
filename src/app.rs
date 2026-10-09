@@ -2,59 +2,56 @@
 // we need to handle errors properly
 mod html;
 
+use std::io;
+
 use axum::response::Response;
 use axum::{http::StatusCode, response::IntoResponse};
 use regex::Regex;
 use reqwest::{self, Client};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_email::Email;
 
 use url::Url;
 
+#[derive(Deserialize)]
+struct ApiError {
+    message: String,
+    code: u16,
+}
+
 use html::{get_html_content, get_nested_html_content};
 
-// I don't think I've modelled all the possible type of errors
-// that could occur
-// Operations:
-// GET /endpoint
-// POST /endpoint/login
-// GET /create
-// POST /create
-#[allow(dead_code)]
 #[derive(thiserror::Error, Debug)]
-enum AppError {
-    //configuration is invalid
-    #[error("Invalid_configuration: {0}")]
-    ConfigInvalid(String),
-    //our endpoint is invalid
-    #[error("Invalid url: {0}")]
-    UrlInvalid(Url),
-    //our endpoint is wrong and returns a 404
-    #[error("Url does not exist: {0}")]
-    UrlNotFound(Url),
-    //this is an error from trying to create the resource
-    #[error("Create error: {0}")]
-    CreateError(String),
-    //this is for other errors that could occur
-    #[error("Server error: {0}")]
-    HttpError(reqwest::Error),
+pub enum AppError {
+    #[error("Invalid base url: {0}")]
+    InvalidBaseUrl(String),
+
+    #[error("Http request failed: {0}")]
+    Reqwest(#[from] reqwest::Error),
+
+    #[error("API returned an error: {message} (code: {code})")]
+    ApiError { message: String, code: u16 },
+
+    #[error("Parse error: {0}")]
+    ParseError(String),
+
+    #[error("IO error: {0}")]
+    Io(#[from] io::Error),
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
-            AppError::ConfigInvalid(_) => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::CreateError(_) => StatusCode::BAD_REQUEST,
-            AppError::UrlInvalid(_) | AppError::UrlNotFound(_) => StatusCode::BAD_REQUEST,
-            AppError::HttpError(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::InvalidBaseUrl(_) => StatusCode::BAD_REQUEST,
+            AppError::ParseError(_) | AppError::Io(_) | AppError::Reqwest(_) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            AppError::ApiError {
+                message: _,
+                code: _,
+            } => StatusCode::NOT_FOUND,
         }
         .into_response()
-    }
-}
-
-impl From<reqwest::Error> for AppError {
-    fn from(value: reqwest::Error) -> Self {
-        Self::HttpError(value)
     }
 }
 
@@ -79,25 +76,26 @@ pub struct Guest {
     pub host_address: String,
 }
 
-struct AccessCode(String, u32);
+pub struct AccessCode(String, u32);
 
-pub fn get_name_and_number(el: &str) -> (String, u32) {
+pub fn get_name_and_number(el: &str) -> Result<AccessCode> {
     let name = Regex::new(r"(?<name>\w+)").unwrap();
     let number = Regex::new(r"(?<number>\d{5})").unwrap();
     let Some(caps) = name.captures(el) else {
-        //we are saying it should be nonrecoverable, should it though?
-        // Ans: this should not be unrecoverable,
-        panic!("No name match")
+        return Err(AppError::ParseError(String::from(
+            "Could not find the name",
+        )));
     };
     let Some(num_caps) = number.captures(el) else {
-        //similarly here
-        panic!("No number match")
+        return Err(AppError::ParseError(String::from(
+            "Could not find the number",
+        )));
     };
     let name = String::from(&caps["name"]);
     let number: u32 = num_caps["number"]
         .parse()
         .unwrap();
-    (name, number)
+    Ok(AccessCode(name, number))
 }
 
 async fn get_access_code(
@@ -105,47 +103,44 @@ async fn get_access_code(
     create_endpoint: &str,
     guest: &Guest,
 ) -> Result<AccessCode> {
-    let html = client
+    let res = client
         .post(create_endpoint)
         .form(&guest)
         .send()
-        .await?
-        .text()
         .await?;
 
-    // if !res
-    //    .status()
-    //    .is_success()
-    //{
-    //    println!(
-    //        "An error occured: {}",
-    //        res.status()
-    //            .as_str()
-    //    )
-    // } else {
-    //   use::reqwest::Err(
-    //        "Reached the create endpoint, got ok: {}",
-    //        res.status()
-    //            .as_str()
-    //    )
-    // }
+    if !res
+        .status()
+        .is_success()
+    {
+        let api_error: ApiError = res
+            .json()
+            .await?;
+        return Err(AppError::ApiError {
+            message: api_error.message,
+            code: api_error.code,
+        });
+    }
+
+    let html = res
+        .text()
+        .await?;
 
     let guest_with_code = get_html_content("h2", &html);
     let _ = get_nested_html_content("h5", "p", &html);
 
-    let (name, number) = get_name_and_number(&guest_with_code);
+    let AccessCode(name, number) = get_name_and_number(&guest_with_code)?;
 
     Ok(AccessCode(name, number))
 }
 
-// type Result<T = ()> = std::result::Result<T, AppError>;
+pub type Result<T = ()> = std::result::Result<T, AppError>;
 
 pub async fn app(config: AppConfig) -> Result<u32> {
     let client = reqwest::Client::builder()
         .cookie_store(true)
         .build()?;
 
-    // TODO: what happens if there's an error here?
     let res = client
         .get(
             config
@@ -155,11 +150,17 @@ pub async fn app(config: AppConfig) -> Result<u32> {
         .send()
         .await?;
 
-    if res
+    if !res
         .status()
         .is_success()
     {
-        println!("{}", "successfully pinged")
+        let api_error: ApiError = res
+            .json()
+            .await?;
+        return Err(AppError::ApiError {
+            message: api_error.message,
+            code: api_error.code,
+        });
     }
 
     let form_data = FormData {
@@ -170,7 +171,7 @@ pub async fn app(config: AppConfig) -> Result<u32> {
     };
 
     let endpoint = format!("{}/{}", config.endpoint, "login");
-    //TODO: what happens if there's an error here?
+
     let res = client
         .post(endpoint)
         .form(&form_data)
@@ -181,40 +182,41 @@ pub async fn app(config: AppConfig) -> Result<u32> {
         .status()
         .is_success()
     {
-        eprintln!(
-            "{}",
-            res.status()
-                .as_str()
-        )
+        let api_error: ApiError = res
+            .json()
+            .await?;
+        return Err(AppError::ApiError {
+            message: api_error.message,
+            code: api_error.code,
+        });
     }
 
-    let status = res
-        .status()
-        .as_str()
-        .to_owned();
-    println!("ok: {}", status);
-
     let create_endpoint = format!("{}/{}", config.endpoint, "create");
-    //TODO: what happens if there's an error here
     let res = client
         .get(create_endpoint.to_string())
         .send()
         .await?;
 
-    if res
+    if !res
         .status()
         .is_success()
     {
-        println!(
-            "Ok: {}",
-            res.status()
-                .as_str()
-        )
+        let api_error: ApiError = res
+            .json()
+            .await?;
+        return Err(AppError::ApiError {
+            message: api_error.message,
+            code: api_error.code,
+        });
     }
 
     let guest = Guest {
-        guest_name: "Opeyemi".to_string(),
-        host_address: "26, wakati adura street".to_string(),
+        guest_name: config
+            .visitor
+            .to_string(),
+        host_address: config
+            .address
+            .to_string(),
     };
 
     let mut state = String::new();
@@ -261,8 +263,11 @@ mod tests {
 
     #[test]
     fn it_extracts_name_and_number_from_text() {
-        let (name, number) = get_name_and_number("Opeyemi 51402");
-        assert_eq!(name, "Opeyemi");
-        assert_eq!(number, 51402)
+        let access_code = get_name_and_number("Opeyemi 51402");
+        // Not sure tests should be checking the enum
+        if let Ok(AccessCode(name, number)) = access_code {
+            assert_eq!(name, "Opeyemi");
+            assert_eq!(number, 51402)
+        }
     }
 }
