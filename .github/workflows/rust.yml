@@ -8,7 +8,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
-  IMAGE: ghcr.io/${{ github.repository }} 
+  IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
   build:
@@ -47,7 +47,7 @@ jobs:
       with:
         context: .
         push: true
-        tags: ghcr.io/${{ env.IMAGE }}:latest 
+        tags: ${{ env.IMAGE }}:latest
    
   deploy:
     needs: build
