@@ -1,4 +1,4 @@
-name: Rust
+name: Build, Test and deploy to Prod
 
 on:
   push:
@@ -15,8 +15,72 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v4
-    - name: Build
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust
+      uses: actions-rs/toolchain@v1
+      with:
+        profile: minimal
+        toolchain: stable
+
+    - name: Build project
       run: cargo build --verbose
+
     - name: Run tests
       run: cargo test --verbose
+
+    - name: Setup docker buildx
+      uses: docker/setup-buildx-action@v3
+
+    - name: Login to docker container registry
+      uses: docker/login-action@v3.3.0
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push Docker image
+      id: push
+      uses: docker/build-push-action@v6.5.0
+      with:
+        context: .
+        push: true
+        tags: |
+          ${{ env.IMAGE }}:${{ github.sha }}
+          ${{ env.IMAGE}}:latest
+        cache-from: type=registry,ref=${{ env.IMAGE }}:buildcache
+        cache-to: type=registry,ref=${{ env.IMAGE}}:buildcache,mode=max
+   
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+    
+    - name: Login to Docker hub
+      uses: docker/login-action@v3.3.0
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    
+    - name: Deploy to droplet
+      uses: appleboy/ssh-action@1.2.2
+      with:
+        host: ${{ vars.DROPLET_IP }}
+        username: kehinde
+        key: ${{ secrets.DROPLET_SSH_KEY }}
+        fingerprint: ${{ secrets.DROPLET_HOST_FINGERPRINT }}
+        script: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          docker pull ${{ env.IMAGE }}:${{ github.sha }}
+          docker logout ghcr.io
+          docker rm -f myapp || true
+          docker run -d --name access-code-server --restart unless-stopped \
+          --env-file /home/kehinde/deploy/server.env
+          -p 80:3000
+          ${{ env.IMAGE }}:${{ github.sha }}
+          docker image prune -f
