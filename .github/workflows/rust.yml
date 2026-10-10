@@ -10,6 +10,10 @@ env:
   CARGO_TERM_COLOR: always
   IMAGE: ghcr.io/${{ github.repository }}
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   build:
 
@@ -47,7 +51,9 @@ jobs:
       with:
         context: .
         push: true
-        tags: ${{ env.IMAGE }}:latest
+        tags: |
+          ${{ env.IMAGE }}:latest
+          ${{ env.IMAGE }}:${{ github.sha }}
    
   deploy:
     needs: build
@@ -77,7 +83,7 @@ jobs:
           docker logout ghcr.io
           docker rm -f myapp || true
           docker run -d --name access-code-server --restart unless-stopped \
-          --env-file /home/kehinde/deploy/server.env
-          -p 80:3000
+          --env-file /home/kehinde/deploy/server.env \
+          -p 80:3000 \
           ${{ env.IMAGE }}:${{ github.sha }}
           docker image prune -f
