@@ -71,7 +71,7 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
     
     - name: Deploy to droplet
-      uses: appleboy/ssh-action@1.2.2
+      uses: appleboy/ssh-action@v1
       with:
         host: ${{ vars.DROPLET_IP }}
         username: kehinde
