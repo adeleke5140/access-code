@@ -7,7 +7,7 @@ use reqwest::{self, Client};
 use serde::{Deserialize, Serialize};
 use serde_email::Email;
 use std::io;
-use tracing::info;
+use tracing::{Instrument, info, info_span};
 
 use url::Url;
 
@@ -142,7 +142,6 @@ pub async fn app(config: AppConfig) -> Result<u32> {
         .cookie_store(true)
         .build()?;
 
-    info!("checking site...");
     let res = client
         .get(
             config
@@ -150,6 +149,7 @@ pub async fn app(config: AppConfig) -> Result<u32> {
                 .to_string(),
         )
         .send()
+        .instrument(info_span!("api", step = "checking site..."))
         .await?;
 
     if !res
@@ -174,11 +174,11 @@ pub async fn app(config: AppConfig) -> Result<u32> {
 
     let endpoint = format!("{}/{}", config.endpoint, "login");
 
-    info!("logging in...");
     let res = client
         .post(endpoint)
         .form(&form_data)
         .send()
+        .instrument(info_span!("api", step = "logging in..."))
         .await?;
 
     if !res
@@ -195,10 +195,10 @@ pub async fn app(config: AppConfig) -> Result<u32> {
     }
 
     let create_endpoint = format!("{}/{}", config.endpoint, "create");
-    info!("opening create page");
     let res = client
         .get(create_endpoint.to_string())
         .send()
+        .instrument(info_span!("api", step = "opening create page"))
         .await?;
 
     if !res
@@ -225,18 +225,29 @@ pub async fn app(config: AppConfig) -> Result<u32> {
 
     let mut state = String::new();
 
-    info!("getting access code...");
-    let AccessCode(name, code) = get_access_code(&client, &create_endpoint, &guest).await?;
+    let AccessCode(name, code) = get_access_code(&client, &create_endpoint, &guest)
+        .instrument(info_span!("api", step = "getting access code..."))
+        .await?;
 
     state.push_str(&name);
 
+    //how do i even test this?
+    //given a wrong name returned from the server
+    //how do we test that we retry and get the right one
     while state.to_lowercase()
         != guest
             .guest_name
             .to_lowercase()
     {
         info!(returned = %state, expected= %&guest.guest_name, "name mismatch, retrying");
-        let AccessCode(name, _) = get_access_code(&client, &create_endpoint, &guest).await?;
+        let str = format!(
+            "returned={} expected={} name mismatch, retrying",
+            state, &guest.guest_name
+        );
+        let AccessCode(name, _) = get_access_code(&client, &create_endpoint, &guest)
+            .instrument(info_span!("api", span = str))
+            .await?;
+
         state = name;
     }
 

@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::fmt::format::FmtSpan;
 use url::Url;
 
 #[derive(Deserialize)]
@@ -101,6 +102,7 @@ async fn server(config: &Config) -> Result<Router> {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
+        .with_span_events(FmtSpan::CLOSE)
         .with_env_filter(
             EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| EnvFilter::new("info,tower_http=warn")),
