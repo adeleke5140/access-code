@@ -5,7 +5,9 @@ edition = "2024"
 
 [dependencies]
 axum = "0.8.9"
+env_logger = "0.11.11"
 envy = "0.4.2"
+log = "0.4.34"
 passcheck = "0.2.0"
 regex = "1.13.1"
 reqwest = { version = "0.13.5", features = ["form", "json", "cookies"] }
@@ -15,4 +17,6 @@ serde-email = "4.0.0"
 serde_json = "1.0.151"
 thiserror = "2.0.21"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread"] }
+tower-http = { version = "0.7.1", features = [ "trace" ] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 url = "2.5.8"

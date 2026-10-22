@@ -1,3 +1,4 @@
+use crate::app::{AppError, Result};
 use scraper::{Html, Selector};
 
 pub fn get_html_content(el: &str, html: &str) -> String {
@@ -13,7 +14,8 @@ pub fn get_html_content(el: &str, html: &str) -> String {
         .to_string()
 }
 
-pub fn get_nested_html_content(parent_el: &str, child_el: &str, html: &str) -> String {
+#[allow(dead_code)]
+pub fn get_nested_html_content(parent_el: &str, child_el: &str, html: &str) -> Result<String> {
     let html = Html::parse_document(html);
     let parent_selector = Selector::parse(parent_el).unwrap();
     let child_selector = Selector::parse(child_el).unwrap();
@@ -28,12 +30,13 @@ pub fn get_nested_html_content(parent_el: &str, child_el: &str, html: &str) -> S
         .into_iter();
     let el = elements.nth(0);
     if let Some(el) = el {
-        el.text()
+        Ok(el
+            .text()
             .collect::<Vec<_>>()
             .join("")
             .trim()
-            .to_string()
+            .to_string())
     } else {
-        panic!("could not find element")
+        Err(AppError::NotFound("could not find element".to_string()))
     }
 }

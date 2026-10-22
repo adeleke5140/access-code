@@ -2,10 +2,14 @@ mod app;
 
 use axum::extract::State;
 use axum::{Json, Router, routing::get, routing::post};
+use log::info;
 use serde::{Deserialize, Serialize};
 use serde_email::Email;
 use serde_json::{Value, json};
+use std::net::SocketAddr;
 use std::sync::Arc;
+use tower_http::trace::TraceLayer;
+use tracing_subscriber::EnvFilter;
 use url::Url;
 
 use crate::app::{AppConfig, AppError, Result, app};
@@ -84,15 +88,23 @@ async fn server(config: &Config) -> Result<Router> {
     let router = Router::new()
         .route("/access-code", post(handle_access_code))
         .route("/", get(json))
-        .with_state(state);
+        .with_state(state)
+        .layer(TraceLayer::new_for_http());
 
     Ok(router)
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    tracing_subscriber::fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap())
+        .init();
+
     let config =
         envy::from_env::<Config>().unwrap_or_else(|error| panic!("could not read env: {}", error));
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
+    info!("Starting server on {addr:#?}");
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
         .await

@@ -19,7 +19,7 @@ struct ApiError {
     code: u16,
 }
 
-use html::{get_html_content, get_nested_html_content};
+use html::get_html_content;
 
 #[derive(thiserror::Error, Debug)]
 pub enum AppError {
@@ -35,6 +35,9 @@ pub enum AppError {
     #[error("Parse error: {0}")]
     ParseError(String),
 
+    #[error("Search error: {0}")]
+    NotFound(String),
+
     #[error("IO error: {0}")]
     Io(#[from] io::Error),
 }
@@ -43,13 +46,14 @@ impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         match self {
             AppError::InvalidBaseUrl(_) => StatusCode::BAD_REQUEST,
-            AppError::ParseError(_) | AppError::Io(_) | AppError::Reqwest(_) => {
-                StatusCode::INTERNAL_SERVER_ERROR
-            }
-            AppError::ApiError {
+            AppError::ParseError(_)
+            | AppError::Io(_)
+            | AppError::Reqwest(_)
+            | AppError::ApiError {
                 message: _,
                 code: _,
-            } => StatusCode::NOT_FOUND,
+            } => StatusCode::INTERNAL_SERVER_ERROR,
+            AppError::NotFound(_) => StatusCode::NOT_FOUND,
         }
         .into_response()
     }
@@ -127,7 +131,6 @@ async fn get_access_code(
         .await?;
 
     let guest_with_code = get_html_content("h2", &html);
-    let _ = get_nested_html_content("h5", "p", &html);
 
     let AccessCode(name, number) = get_name_and_number(&guest_with_code)?;
 
@@ -240,6 +243,7 @@ pub async fn app(config: AppConfig) -> Result<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::html::get_nested_html_content;
 
     const SAMPLE_HTML: &str = r#"
      !DOCTYPE html>
@@ -257,17 +261,15 @@ mod tests {
 
     #[test]
     fn it_gets_nested_text_from_html() {
-        let text = get_nested_html_content("h5", "p", SAMPLE_HTML);
+        let text = get_nested_html_content("h5", "p", SAMPLE_HTML).unwrap();
         assert_eq!(text, "opeyemi adeleke")
     }
 
     #[test]
     fn it_extracts_name_and_number_from_text() {
         let access_code = get_name_and_number("Opeyemi 51402");
-        // Not sure tests should be checking the enum
-        if let Ok(AccessCode(name, number)) = access_code {
-            assert_eq!(name, "Opeyemi");
-            assert_eq!(number, 51402)
-        }
+        let AccessCode(name, number) = access_code.unwrap();
+        assert_eq!(name, "Opeyemi");
+        assert_eq!(number, 51402)
     }
 }
