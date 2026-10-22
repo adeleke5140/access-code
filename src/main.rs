@@ -1,5 +1,6 @@
 mod app;
 
+use crate::app::{AppConfig, AppError, Result, app};
 use axum::extract::State;
 use axum::{Json, Router, routing::get, routing::post};
 use log::info;
@@ -8,11 +9,10 @@ use serde_email::Email;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tower_http::trace::TraceLayer;
+use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
+use tower_http::trace::{DefaultMakeSpan, TraceLayer};
 use tracing_subscriber::EnvFilter;
 use url::Url;
-
-use crate::app::{AppConfig, AppError, Result, app};
 
 #[derive(Deserialize)]
 struct Config {
@@ -89,7 +89,11 @@ async fn server(config: &Config) -> Result<Router> {
         .route("/access-code", post(handle_access_code))
         .route("/", get(json))
         .with_state(state)
-        .layer(TraceLayer::new_for_http());
+        .layer(PropagateRequestIdLayer::x_request_id())
+        .layer(
+            TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::new().include_headers(true)),
+        )
+        .layer(SetRequestIdLayer::x_request_id(MakeRequestUuid));
 
     Ok(router)
 }
@@ -97,7 +101,10 @@ async fn server(config: &Config) -> Result<Router> {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(EnvFilter::try_from_default_env().unwrap())
+        .with_env_filter(
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info,tower_http=warn")),
+        )
         .init();
 
     let config =

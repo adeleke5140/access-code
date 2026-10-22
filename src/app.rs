@@ -1,8 +1,4 @@
-//TODO: what happens when things go wrong
-// we need to handle errors properly
 mod html;
-
-use std::io;
 
 use axum::response::Response;
 use axum::{http::StatusCode, response::IntoResponse};
@@ -10,6 +6,8 @@ use regex::Regex;
 use reqwest::{self, Client};
 use serde::{Deserialize, Serialize};
 use serde_email::Email;
+use std::io;
+use tracing::info;
 
 use url::Url;
 
@@ -144,6 +142,7 @@ pub async fn app(config: AppConfig) -> Result<u32> {
         .cookie_store(true)
         .build()?;
 
+    info!("checking site...");
     let res = client
         .get(
             config
@@ -175,6 +174,7 @@ pub async fn app(config: AppConfig) -> Result<u32> {
 
     let endpoint = format!("{}/{}", config.endpoint, "login");
 
+    info!("logging in...");
     let res = client
         .post(endpoint)
         .form(&form_data)
@@ -195,6 +195,7 @@ pub async fn app(config: AppConfig) -> Result<u32> {
     }
 
     let create_endpoint = format!("{}/{}", config.endpoint, "create");
+    info!("opening create page");
     let res = client
         .get(create_endpoint.to_string())
         .send()
@@ -224,6 +225,7 @@ pub async fn app(config: AppConfig) -> Result<u32> {
 
     let mut state = String::new();
 
+    info!("getting access code...");
     let AccessCode(name, code) = get_access_code(&client, &create_endpoint, &guest).await?;
 
     state.push_str(&name);
@@ -233,6 +235,7 @@ pub async fn app(config: AppConfig) -> Result<u32> {
             .guest_name
             .to_lowercase()
     {
+        info!(returned = %state, expected= %&guest.guest_name, "name mismatch, retrying");
         let AccessCode(name, _) = get_access_code(&client, &create_endpoint, &guest).await?;
         state = name;
     }
