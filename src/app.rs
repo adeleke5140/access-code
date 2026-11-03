@@ -217,9 +217,11 @@ pub async fn app(config: AppConfig) -> Result<u32> {
     let guest = Guest {
         guest_name: config
             .visitor
+            .trim()
             .to_string(),
         host_address: config
             .address
+            .trim()
             .to_string(),
     };
 
@@ -231,9 +233,8 @@ pub async fn app(config: AppConfig) -> Result<u32> {
 
     state.push_str(&name);
 
-    //how do i even test this?
-    //given a wrong name returned from the server
-    //how do we test that we retry and get the right one
+    // Lots of problems with this while loop
+    // no base case where it just exists
     while state.to_lowercase()
         != guest
             .guest_name
