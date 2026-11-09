@@ -1,14 +1,17 @@
 mod html;
 
+use axum::extract::Request;
+use axum::middleware::Next;
 use axum::response::Response;
-use axum::{http::StatusCode, response::IntoResponse};
+use axum::{extract::FromRequest, http::StatusCode, response::IntoResponse};
+use html::get_html_content;
 use regex::Regex;
 use reqwest::{self, Client};
 use serde::{Deserialize, Serialize};
 use serde_email::Email;
 use std::io;
+use std::sync::Arc;
 use tracing::{Instrument, info, info_span};
-
 use url::Url;
 
 #[derive(Deserialize)]
@@ -16,8 +19,6 @@ struct ApiError {
     message: String,
     code: u16,
 }
-
-use html::get_html_content;
 
 #[derive(thiserror::Error, Debug)]
 pub enum AppError {
@@ -40,20 +41,52 @@ pub enum AppError {
     Io(#[from] io::Error),
 }
 
+#[derive(FromRequest)]
+#[from_request(via(axum::Json), rejection(AppError))]
+struct AppJson<T>(T);
+
+impl<T> IntoResponse for AppJson<T>
+where
+    axum::Json<T>: IntoResponse,
+{
+    fn into_response(self) -> Response {
+        axum::Json(self.0).into_response()
+    }
+}
+
+#[derive(Serialize)]
+struct ErrorResponse {
+    message: String,
+}
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        match self {
-            AppError::InvalidBaseUrl(_) => StatusCode::BAD_REQUEST,
+        let (status, message, err) = match self {
+            AppError::InvalidBaseUrl(_) => (
+                StatusCode::BAD_REQUEST,
+                "bad request".to_owned(),
+                Some(self),
+            ),
             AppError::ParseError(_)
             | AppError::Io(_)
             | AppError::Reqwest(_)
             | AppError::ApiError {
                 message: _,
                 code: _,
-            } => StatusCode::INTERNAL_SERVER_ERROR,
-            AppError::NotFound(_) => StatusCode::NOT_FOUND,
+            } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Something went wrong".to_owned(),
+                Some(self),
+            ),
+            AppError::NotFound(_) => (StatusCode::NOT_FOUND, "not found".to_owned(), Some(self)),
+        };
+
+        let mut response = (status, AppJson(ErrorResponse { message })).into_response();
+        if let Some(err) = err {
+            response
+                .extensions_mut()
+                .insert(Arc::new(err));
         }
-        .into_response()
+        response
     }
 }
 
@@ -78,10 +111,23 @@ pub struct Guest {
     pub host_address: String,
 }
 
+pub async fn log_app_errors(req: Request, next: Next) -> Response {
+    let response = next
+        .run(req)
+        .await;
+    if let Some(err) = response
+        .extensions()
+        .get::<Arc<AppError>>()
+    {
+        tracing::error!(?err, "An unexpected error occured inside the handler")
+    }
+    response
+}
 pub struct AccessCode(String, u32);
 
 pub fn get_name_and_number(el: &str) -> Result<AccessCode> {
-    let name = Regex::new(r"(?<name>\w+)").unwrap();
+    //this regex is wrong
+    let name = Regex::new(r"^\s*(?<name>\D+?)\s+\d+\s*$").unwrap();
     let number = Regex::new(r"(?<number>\d{5})").unwrap();
     let Some(caps) = name.captures(el) else {
         return Err(AppError::ParseError(String::from(
@@ -225,33 +271,50 @@ pub async fn app(config: AppConfig) -> Result<u32> {
             .to_string(),
     };
 
+    let mut max_retries = 5;
+
+    //shared mutable state
     let mut state = String::new();
 
     let AccessCode(name, code) = get_access_code(&client, &create_endpoint, &guest)
         .instrument(info_span!("api", step = "getting access code..."))
         .await?;
 
+    //updated here?
     state.push_str(&name);
 
-    // Lots of problems with this while loop
-    // no base case where it just exists
-    while state.to_lowercase()
-        != guest
-            .guest_name
+    if max_retries > 0 {
+        log::info!("{:?}", name);
+        if state
+            .trim()
             .to_lowercase()
-    {
-        info!(returned = %state, expected= %&guest.guest_name, "name mismatch, retrying");
-        let str = format!(
-            "returned={} expected={} name mismatch, retrying",
-            state, &guest.guest_name
-        );
-        let AccessCode(name, _) = get_access_code(&client, &create_endpoint, &guest)
-            .instrument(info_span!("api", span = str))
-            .await?;
-
-        state = name;
+            != name
+                .trim()
+                .to_lowercase()
+        {
+            info!(returned = %state, expected= %&guest.guest_name, "name mismatch, retrying");
+            let str = format!(
+                "returned={} expected={} name mismatch, retrying",
+                state, &guest.guest_name
+            );
+            let AccessCode(name, _) = get_access_code(&client, &create_endpoint, &guest)
+                .instrument(info_span!("api", span = str))
+                .await?;
+            state = name;
+            max_retries -= 1;
+        }
     }
 
+    if max_retries == 0 {
+        let err_message = format!(
+            "returned={} expected={} name mismatch",
+            state, &guest.guest_name
+        );
+        return Err(AppError::ApiError {
+            message: err_message,
+            code: 500,
+        });
+    }
     Ok(code)
 }
 
@@ -261,10 +324,11 @@ mod tests {
     use crate::app::html::get_nested_html_content;
 
     const SAMPLE_HTML: &str = r#"
-     !DOCTYPE html>
+     <!DOCTYPE html>
     <meta charset="utf-8">
     <title>Hello, world!</title>
     <h1 class="foo">Hello, <i>world!</i></h1>
+    <h2>mr obinna 33588 </h2>
     <h5><p>opeyemi adeleke </p></h5>
         "#;
 
@@ -272,6 +336,12 @@ mod tests {
     fn it_gets_text_from_html() {
         let text = get_html_content("h1", SAMPLE_HTML);
         assert_eq!(text, "Hello, world!")
+    }
+
+    #[test]
+    fn it_gets_space_separated_text_from_html() {
+        let text = get_html_content("h2", SAMPLE_HTML);
+        assert_eq!(text, "mr obinna 33588")
     }
 
     #[test]
@@ -286,5 +356,13 @@ mod tests {
         let AccessCode(name, number) = access_code.unwrap();
         assert_eq!(name, "Opeyemi");
         assert_eq!(number, 51402)
+    }
+
+    #[test]
+    fn it_extracts_name_when_honorific_is_added() {
+        let access_code = get_name_and_number("mr obinna 33588");
+        let AccessCode(name, number) = access_code.unwrap();
+        assert_eq!(name, "mr obinna");
+        assert_eq!(number, 33588)
     }
 }
