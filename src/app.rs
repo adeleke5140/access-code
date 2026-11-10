@@ -9,8 +9,10 @@ use regex::Regex;
 use reqwest::{self, Client};
 use serde::{Deserialize, Serialize};
 use serde_email::Email;
-use std::io;
-use std::sync::Arc;
+use std::{
+    io,
+    sync::{Arc, LazyLock},
+};
 use tracing::{Instrument, info, info_span};
 use url::Url;
 
@@ -126,14 +128,16 @@ pub async fn log_app_errors(req: Request, next: Next) -> Response {
 pub struct AccessCode(String, u32);
 
 pub fn get_name_and_number(el: &str) -> Result<AccessCode> {
-    let name = Regex::new(r"^\s*(?<name>\D+?)\s+\d+\s*$").unwrap();
-    let number = Regex::new(r"(?<number>\d{5})").unwrap();
-    let Some(caps) = name.captures(el) else {
+    static NAME: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^\s*(?<name>\D+?)\s+\d+\s*$").unwrap());
+    static NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?<number>\d{5})").unwrap());
+
+    let Some(caps) = NAME.captures(el) else {
         return Err(AppError::ParseError(String::from(
             "Could not find the name",
         )));
     };
-    let Some(num_caps) = number.captures(el) else {
+    let Some(num_caps) = NUMBER.captures(el) else {
         return Err(AppError::ParseError(String::from(
             "Could not find the number",
         )));
@@ -175,6 +179,7 @@ async fn get_access_code(
 
     let guest_with_code = get_html_content("h2", &html);
 
+    // this recompiles the regex in a loop which is a poor pattern
     let AccessCode(name, number) = get_name_and_number(&guest_with_code)?;
 
     Ok(AccessCode(name, number))
