@@ -126,7 +126,6 @@ pub async fn log_app_errors(req: Request, next: Next) -> Response {
 pub struct AccessCode(String, u32);
 
 pub fn get_name_and_number(el: &str) -> Result<AccessCode> {
-    //this regex is wrong
     let name = Regex::new(r"^\s*(?<name>\D+?)\s+\d+\s*$").unwrap();
     let number = Regex::new(r"(?<number>\d{5})").unwrap();
     let Some(caps) = name.captures(el) else {
