@@ -1,8 +1,8 @@
 mod app;
 
-use crate::app::{AppConfig, AppError, Result, app};
-use axum::extract::State;
+use crate::app::{AppConfig, AppError, Result, app, log_app_errors};
 use axum::{Json, Router, routing::get, routing::post};
+use axum::{extract::State, middleware::from_fn};
 use log::info;
 use serde::{Deserialize, Serialize};
 use serde_email::Email;
@@ -90,6 +90,7 @@ async fn server(config: &Config) -> Result<Router> {
         .route("/access-code", post(handle_access_code))
         .route("/", get(json))
         .with_state(state)
+        .layer(from_fn(log_app_errors))
         .layer(PropagateRequestIdLayer::x_request_id())
         .layer(
             TraceLayer::new_for_http().make_span_with(DefaultMakeSpan::new().include_headers(true)),
@@ -115,9 +116,7 @@ async fn main() -> Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     info!("Starting server on {addr:#?}");
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
-        .await
-        .unwrap_or_else(|error| panic!("{error:#?}"));
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
 
     let server = server(&config).await?;
 
