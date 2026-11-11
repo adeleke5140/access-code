@@ -10,10 +10,11 @@ use reqwest::{self, Client};
 use serde::{Deserialize, Serialize};
 use serde_email::Email;
 use std::{
+    fmt::Display,
     io,
     sync::{Arc, LazyLock},
 };
-use tracing::{Instrument, info, info_span};
+use tracing::{Instrument, info_span};
 use url::Url;
 
 #[derive(Deserialize)]
@@ -125,9 +126,11 @@ pub async fn log_app_errors(req: Request, next: Next) -> Response {
     }
     response
 }
-pub struct AccessCode(String, u32);
 
-pub fn get_name_and_number(el: &str) -> Result<AccessCode> {
+#[derive(Serialize, Debug)]
+pub struct AccessCode(pub String, pub u32);
+
+pub fn extract_name_and_number(el: &str) -> Result<AccessCode> {
     static NAME: LazyLock<Regex> =
         LazyLock::new(|| Regex::new(r"^\s*(?<name>\D+?)\s+\d+\s*$").unwrap());
     static NUMBER: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?<number>\d{5})").unwrap());
@@ -149,71 +152,179 @@ pub fn get_name_and_number(el: &str) -> Result<AccessCode> {
     Ok(AccessCode(name, number))
 }
 
-async fn get_access_code(
-    client: &Client,
-    create_endpoint: &str,
-    guest: &Guest,
-) -> Result<AccessCode> {
-    let res = client
-        .post(create_endpoint)
-        .form(&guest)
-        .send()
-        .await?;
-
-    if !res
-        .status()
-        .is_success()
-    {
-        let api_error: ApiError = res
-            .json()
-            .await?;
-        return Err(AppError::ApiError {
-            message: api_error.message,
-            code: api_error.code,
-        });
-    }
-
-    let html = res
-        .text()
-        .await?;
-
-    let guest_with_code = get_html_content("h2", &html);
-
-    // this recompiles the regex in a loop which is a poor pattern
-    let AccessCode(name, number) = get_name_and_number(&guest_with_code)?;
-
-    Ok(AccessCode(name, number))
-}
-
 pub type Result<T = ()> = std::result::Result<T, AppError>;
 
-pub async fn app(config: AppConfig) -> Result<u32> {
-    let client = reqwest::Client::builder()
-        .cookie_store(true)
-        .build()?;
+struct ProxyClient {
+    base_url: String,
+    http_client: Client,
+}
 
-    let res = client
-        .get(
-            config
-                .endpoint
-                .to_string(),
-        )
-        .send()
-        .instrument(info_span!("api", step = "checking site..."))
-        .await?;
+impl ProxyClient {
+    pub fn new(base_url: &str) -> Result<Self> {
+        let endpoint = Url::parse(&base_url)
+            .map_err(|_| AppError::InvalidBaseUrl("Base url is invalid".to_string()))?;
 
-    if !res
-        .status()
-        .is_success()
-    {
-        let api_error: ApiError = res
-            .json()
-            .await?;
-        return Err(AppError::ApiError {
-            message: api_error.message,
-            code: api_error.code,
-        });
+        Ok(Self {
+            base_url: endpoint.to_string(),
+            http_client: Client::builder()
+                .cookie_store(true)
+                .build()?,
+        })
     }
+
+    fn get_url<P: Display>(&self, path: P) -> String {
+        format!(
+            "{}/{}",
+            self.base_url
+                .trim_end_matches("/"),
+            path
+        )
+    }
+
+    pub async fn get_to_home(&self) -> Result<()> {
+        let res = self
+            .http_client
+            .get(&self.base_url)
+            .send()
+            .await?;
+
+        if !res
+            .status()
+            .is_success()
+        {
+            let api_error: ApiError = res
+                .json()
+                .await?;
+            return Err(AppError::ApiError {
+                message: api_error.message,
+                code: api_error.code,
+            });
+        }
+
+        Ok(())
+    }
+
+    pub async fn login(&self, form_data: FormData) -> Result<()> {
+        let url = self.get_url("login");
+
+        let res = self
+            .http_client
+            .post(url)
+            .form(&form_data)
+            .send()
+            .instrument(info_span!("api", step = "logging in..."))
+            .await?;
+
+        if !res
+            .status()
+            .is_success()
+        {
+            let api_error: ApiError = res
+                .json()
+                .await?;
+            return Err(AppError::ApiError {
+                message: api_error.message,
+                code: api_error.code,
+            });
+        }
+
+        Ok(())
+    }
+
+    pub async fn go_to_create(&self) -> Result<()> {
+        let url = self.get_url("create");
+
+        let res = self
+            .http_client
+            .get(url)
+            .send()
+            .instrument(info_span!("api", step = "opening create page"))
+            .await?;
+
+        if !res
+            .status()
+            .is_success()
+        {
+            let api_error: ApiError = res
+                .json()
+                .await?;
+            return Err(AppError::ApiError {
+                message: api_error.message,
+                code: api_error.code,
+            });
+        }
+        Ok(())
+    }
+
+    pub async fn get_access_code(&self, guest: &Guest, retries: u32) -> Result<AccessCode> {
+        log::info!("{:?}", retries);
+        if retries < 1 {
+            return Err(AppError::ApiError {
+                message: "could not get code".to_string(),
+                code: 500,
+            });
+        }
+
+        let url = self.get_url("create");
+        let res = self
+            .http_client
+            .post(url)
+            .form(&guest)
+            .send()
+            .await?;
+
+        if !res
+            .status()
+            .is_success()
+        {
+            let api_error: ApiError = res
+                .json()
+                .await?;
+            return Err(AppError::ApiError {
+                message: api_error.message,
+                code: api_error.code,
+            });
+        }
+
+        let html = res
+            .text()
+            .await?;
+
+        let guest_with_code = get_html_content("h2", &html);
+        let AccessCode(name, number) = extract_name_and_number(&guest_with_code)?;
+
+        if name
+            .trim()
+            .to_lowercase()
+            != guest
+                .guest_name
+                .trim()
+                .to_lowercase()
+        {
+            log::info!("{:?} retrie(s) left", retries);
+            let str = format!(
+                "returned={} expected={} name mismatch, retrying",
+                name, guest.guest_name
+            );
+            return Box::pin(self.get_access_code(guest, retries - 1))
+                .instrument(info_span!("api", span = str))
+                .await;
+        }
+
+        Ok(AccessCode(name, number))
+    }
+}
+
+pub async fn app(config: AppConfig) -> Result<u32> {
+    let client = ProxyClient::new(
+        &config
+            .endpoint
+            .to_string(),
+    )?;
+
+    client
+        .get_to_home()
+        .await?;
 
     let form_data = FormData {
         user_name: config
@@ -222,47 +333,13 @@ pub async fn app(config: AppConfig) -> Result<u32> {
         user_psswrd: config.password,
     };
 
-    let endpoint = format!("{}/{}", config.endpoint, "login");
-
-    let res = client
-        .post(endpoint)
-        .form(&form_data)
-        .send()
-        .instrument(info_span!("api", step = "logging in..."))
+    client
+        .login(form_data)
         .await?;
 
-    if !res
-        .status()
-        .is_success()
-    {
-        let api_error: ApiError = res
-            .json()
-            .await?;
-        return Err(AppError::ApiError {
-            message: api_error.message,
-            code: api_error.code,
-        });
-    }
-
-    let create_endpoint = format!("{}/{}", config.endpoint, "create");
-    let res = client
-        .get(create_endpoint.to_string())
-        .send()
-        .instrument(info_span!("api", step = "opening create page"))
+    client
+        .go_to_create()
         .await?;
-
-    if !res
-        .status()
-        .is_success()
-    {
-        let api_error: ApiError = res
-            .json()
-            .await?;
-        return Err(AppError::ApiError {
-            message: api_error.message,
-            code: api_error.code,
-        });
-    }
 
     let guest = Guest {
         guest_name: config
@@ -275,50 +352,12 @@ pub async fn app(config: AppConfig) -> Result<u32> {
             .to_string(),
     };
 
-    let mut max_retries = 5;
-
-    //shared mutable state
-    let mut state = String::new();
-
-    let AccessCode(name, code) = get_access_code(&client, &create_endpoint, &guest)
-        .instrument(info_span!("api", step = "getting access code..."))
+    let AccessCode(name, code) = client
+        .get_access_code(&guest, 5)
         .await?;
 
-    //updated here?
-    state.push_str(&name);
+    log::info!("name: {:?} and code: {:?}", name, code);
 
-    if max_retries > 0 {
-        log::info!("{:?}", name);
-        if state
-            .trim()
-            .to_lowercase()
-            != name
-                .trim()
-                .to_lowercase()
-        {
-            info!(returned = %state, expected= %&guest.guest_name, "name mismatch, retrying");
-            let str = format!(
-                "returned={} expected={} name mismatch, retrying",
-                state, &guest.guest_name
-            );
-            let AccessCode(name, _) = get_access_code(&client, &create_endpoint, &guest)
-                .instrument(info_span!("api", span = str))
-                .await?;
-            state = name;
-            max_retries -= 1;
-        }
-    }
-
-    if max_retries == 0 {
-        let err_message = format!(
-            "returned={} expected={} name mismatch",
-            state, &guest.guest_name
-        );
-        return Err(AppError::ApiError {
-            message: err_message,
-            code: 500,
-        });
-    }
     Ok(code)
 }
 
@@ -356,7 +395,7 @@ mod tests {
 
     #[test]
     fn it_extracts_name_and_number_from_text() {
-        let access_code = get_name_and_number("Opeyemi 51402");
+        let access_code = extract_name_and_number("Opeyemi 51402");
         let AccessCode(name, number) = access_code.unwrap();
         assert_eq!(name, "Opeyemi");
         assert_eq!(number, 51402)
@@ -364,7 +403,7 @@ mod tests {
 
     #[test]
     fn it_extracts_name_when_honorific_is_added() {
-        let access_code = get_name_and_number("mr obinna 33588");
+        let access_code = extract_name_and_number("mr obinna 33588");
         let AccessCode(name, number) = access_code.unwrap();
         assert_eq!(name, "mr obinna");
         assert_eq!(number, 33588)
