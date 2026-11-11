@@ -116,9 +116,7 @@ async fn main() -> Result<()> {
     let addr = SocketAddr::from(([127, 0, 0, 1], 3000));
     info!("Starting server on {addr:#?}");
 
-    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000")
-        .await
-        .unwrap_or_else(|error| panic!("{error:#?}"));
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
 
     let server = server(&config).await?;
 
